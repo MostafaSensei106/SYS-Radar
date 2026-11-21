@@ -87,6 +87,8 @@ pub struct ProcessTelemetry {
     pub cpu_pct: f64,
     pub rss_bytes: u64,
     pub threads: u32,
+    pub gpu_util_pct: Option<u32>,
+    pub gpu_mem_bytes: Option<u64>,
 }
 
 // ** ------------------------------------------------------------- **

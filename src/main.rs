@@ -13,7 +13,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use sys_radar::{
     domain::telemetry::SystemSnapshot,
     hal::create_collector,
-    ui::dashboard::{SortField, UiState, filtered_processes, render_dashboard},
+    ui::{SortField, UiState, dashboard::render_dashboard, filtered_processes},
 };
 
 enum ControlCmd {
@@ -106,7 +106,17 @@ fn main() -> Result<()> {
         {
             if ui_state.filter_active {
                 match key.code {
-                    KeyCode::Esc | KeyCode::Enter => ui_state.filter_active = false,
+                    KeyCode::Enter => {
+                        ui_state.filter_active = false;
+                        ui_state.filter_before_edit = None;
+                    }
+                    KeyCode::Esc => {
+                        if let Some(previous) = ui_state.filter_before_edit.take() {
+                            ui_state.process_filter = previous;
+                        }
+                        ui_state.filter_active = false;
+                        ui_state.table_state.select(Some(0));
+                    }
                     KeyCode::Backspace => {
                         ui_state.process_filter.pop();
                         ui_state.table_state.select(Some(0));
@@ -117,10 +127,24 @@ fn main() -> Result<()> {
                     }
                     _ => {}
                 }
+            } else if let Some(pid) = ui_state.pending_kill {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        let _ = cmd_tx.try_send(ControlCmd::Kill(pid));
+                        ui_state.pending_kill = None;
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        ui_state.pending_kill = None;
+                    }
+                    _ => {}
+                }
             } else {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
-                    KeyCode::Char('/') => ui_state.filter_active = true,
+                    KeyCode::Char('/') => {
+                        ui_state.filter_before_edit = Some(ui_state.process_filter.clone());
+                        ui_state.filter_active = true;
+                    }
                     KeyCode::Char('x') => {
                         ui_state.process_filter.clear();
                         ui_state.table_state.select(Some(0));
@@ -144,7 +168,7 @@ fn main() -> Result<()> {
                             .get(ui_state.table_state.selected().unwrap_or(0))
                             .copied();
                         if let Some(proc_item) = selected {
-                            let _ = cmd_tx.try_send(ControlCmd::Kill(proc_item.pid));
+                            ui_state.pending_kill = Some(proc_item.pid);
                         }
                     }
                     _ => {}

@@ -38,6 +38,8 @@ pub struct WindowsWin32Collector {
     nvml: Option<Nvml>,
     prev_sys_times: (u64, u64, u64),
     prev_proc_times: HashMap<u32, u64>,
+    gpu_processes: HashMap<u32, (Option<u32>, Option<u64>)>,
+    gpu_last_seen_timestamp: u64,
     prev_net: (u64, u64),
     last_sample: Instant,
 }
@@ -73,6 +75,8 @@ impl WindowsWin32Collector {
             nvml: Nvml::init().ok(),
             prev_sys_times,
             prev_proc_times: HashMap::with_capacity(512),
+            gpu_processes: HashMap::new(),
+            gpu_last_seen_timestamp: 0,
             prev_net,
             last_sample: Instant::now(),
         })
@@ -99,10 +103,13 @@ impl WindowsWin32Collector {
         let mut table_ptr: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
         let (mut rx, mut tx) = (0u64, 0u64);
         unsafe {
-            GetIfTable2(&mut table_ptr).map_err(|e| HalError::PlatformApi {
-                api: "GetIfTable2",
-                detail: e.to_string(),
-            })?;
+            let result = GetIfTable2(&mut table_ptr);
+            if result.0 != 0 {
+                return Err(HalError::PlatformApi {
+                    api: "GetIfTable2",
+                    detail: format!("Windows error {}", result.0),
+                });
+            }
             if !table_ptr.is_null() {
                 let table = &*table_ptr;
                 let rows =
@@ -227,6 +234,8 @@ impl WindowsWin32Collector {
                     cpu_pct,
                     rss_bytes: rss,
                     threads: entry.cntThreads,
+                    gpu_util_pct: None,
+                    gpu_mem_bytes: None,
                 });
 
                 if unsafe { Process32NextW(snap, &mut entry).is_err() } {
@@ -257,14 +266,49 @@ impl WindowsWin32Collector {
             clock_graphics_mhz: dev.clock_info(Clock::Graphics).unwrap_or(0),
         })
     }
+
+    fn refresh_gpu_processes(&mut self) {
+        let Some(nvml) = self.nvml.as_ref() else {
+            self.gpu_processes.clear();
+            return;
+        };
+        let Ok(device) = nvml.device_by_index(0) else {
+            return;
+        };
+
+        let mut active_pids = std::collections::HashSet::new();
+        for process in device
+            .running_graphics_processes()
+            .into_iter()
+            .flatten()
+            .chain(device.running_compute_processes().into_iter().flatten())
+        {
+            active_pids.insert(process.pid);
+            let memory = match process.used_gpu_memory {
+                nvml_wrapper::enums::device::UsedGpuMemory::Used(bytes) => Some(bytes),
+                nvml_wrapper::enums::device::UsedGpuMemory::Unavailable => None,
+            };
+            self.gpu_processes.entry(process.pid).or_default().1 = memory;
+        }
+
+        if let Ok(samples) = device.process_utilization_stats(self.gpu_last_seen_timestamp) {
+            for sample in samples {
+                self.gpu_last_seen_timestamp = self.gpu_last_seen_timestamp.max(sample.timestamp);
+                self.gpu_processes.entry(sample.pid).or_default().0 = Some(sample.sm_util);
+                active_pids.insert(sample.pid);
+            }
+        }
+        self.gpu_processes
+            .retain(|pid, _| active_pids.contains(pid));
+    }
 }
 
 impl HardwareCollector for WindowsWin32Collector {
-    fn static_specs(&self) -> &HostStaticSpecs {
+    fn static_soecs(&self) -> &HostStaticSpecs {
         &self.specs
     }
 
-    fn collect(&mut self) -> Result<SystemSnapshot> {
+    fn collect(&mut self) -> std::result::Result<SystemSnapshot, HalError> {
         let now = Instant::now();
         let dt_secs = now.duration_since(self.last_sample).as_secs_f64().max(0.05);
         self.last_sample = now;
@@ -309,6 +353,15 @@ impl HardwareCollector for WindowsWin32Collector {
             })
             .collect();
 
+        let mut processes = self.read_processes(total_d)?;
+        self.refresh_gpu_processes();
+        for process in &mut processes {
+            if let Some((util, memory)) = self.gpu_processes.get(&process.pid) {
+                process.gpu_util_pct = *util;
+                process.gpu_mem_bytes = *memory;
+            }
+        }
+
         Ok(SystemSnapshot {
             specs: self.specs.clone(),
             global_cpu_pct,
@@ -325,12 +378,12 @@ impl HardwareCollector for WindowsWin32Collector {
             gpu: self.read_gpu(),
             disks: Self::read_disks(),
             net,
-            processes: self.read_processes(total_d)?,
+            processes,
             uptime_secs: unsafe { GetTickCount64() } / 1000,
         })
     }
 
-    fn kill_process(&self, pid: u32) -> Result<()> {
+    fn kill_process(&self, pid: u32) -> std::result::Result<(), HalError> {
         unsafe {
             let handle =
                 OpenProcess(PROCESS_TERMINATE, false, pid).map_err(|e| HalError::PlatformApi {
@@ -343,6 +396,7 @@ impl HardwareCollector for WindowsWin32Collector {
             });
             let _ = CloseHandle(handle);
             res.with_context(|| format!("Failed to terminate PID {}", pid))
+                .map_err(HalError::from)
         }
     }
 }

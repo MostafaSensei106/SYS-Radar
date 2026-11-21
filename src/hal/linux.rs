@@ -57,6 +57,8 @@ pub struct LinuxProcCollector {
     prev_global_cpu: CpuTimes,
     prev_cores: Vec<CpuTimes>,
     prev_proc_ticks: HashMap<u32, u64>,
+    gpu_processes: HashMap<u32, (Option<u32>, Option<u64>)>,
+    gpu_last_seen_timestamp: u64,
     prev_net: (u64, u64),
     prev_disk_io: HashMap<String, (u64, u64)>,
     last_sample: Instant,
@@ -157,6 +159,8 @@ impl LinuxProcCollector {
             prev_global_cpu: global_cpu,
             prev_cores: cores,
             prev_proc_ticks: HashMap::with_capacity(512),
+            gpu_processes: HashMap::new(),
+            gpu_last_seen_timestamp: 0,
             prev_net: net,
             prev_disk_io: disk_io,
             last_sample: Instant::now(),
@@ -472,6 +476,8 @@ impl LinuxProcCollector {
                 cpu_pct,
                 rss_bytes: rss_pages * self.page_size,
                 threads,
+                gpu_util_pct: None,
+                gpu_mem_bytes: None,
             });
         }
 
@@ -493,6 +499,41 @@ impl LinuxProcCollector {
             power_mw: dev.power_usage().unwrap_or(0),
             clock_graphics_mhz: dev.clock_info(Clock::Graphics).unwrap_or(0),
         })
+    }
+
+    fn refresh_gpu_processes(&mut self) {
+        let Some(nvml) = self.nvml.as_ref() else {
+            self.gpu_processes.clear();
+            return;
+        };
+        let Ok(device) = nvml.device_by_index(0) else {
+            return;
+        };
+
+        let mut active_pids = HashSet::new();
+        for process in device
+            .running_graphics_processes()
+            .into_iter()
+            .flatten()
+            .chain(device.running_compute_processes().into_iter().flatten())
+        {
+            active_pids.insert(process.pid);
+            let memory = match process.used_gpu_memory {
+                nvml_wrapper::enums::device::UsedGpuMemory::Used(bytes) => Some(bytes),
+                nvml_wrapper::enums::device::UsedGpuMemory::Unavailable => None,
+            };
+            self.gpu_processes.entry(process.pid).or_default().1 = memory;
+        }
+
+        if let Ok(samples) = device.process_utilization_stats(self.gpu_last_seen_timestamp) {
+            for sample in samples {
+                self.gpu_last_seen_timestamp = self.gpu_last_seen_timestamp.max(sample.timestamp);
+                self.gpu_processes.entry(sample.pid).or_default().0 = Some(sample.sm_util);
+                active_pids.insert(sample.pid);
+            }
+        }
+        self.gpu_processes
+            .retain(|pid, _| active_pids.contains(pid));
     }
 }
 impl HardwareCollector for LinuxProcCollector {
@@ -559,7 +600,14 @@ impl HardwareCollector for LinuxProcCollector {
         self.prev_net = (rx, tx);
 
         let disks = self.read_mounts(dt_secs).unwrap();
-        let processes = self.read_processes(total_delta).unwrap();
+        let mut processes = self.read_processes(total_delta).unwrap();
+        self.refresh_gpu_processes();
+        for process in &mut processes {
+            if let Some((util, memory)) = self.gpu_processes.get(&process.pid) {
+                process.gpu_util_pct = *util;
+                process.gpu_mem_bytes = *memory;
+            }
+        }
 
         let uptime_secs = Self::read_into_buf(&self.paths.proc_uptime, &mut self.scratch_buf)
             .ok()
@@ -577,6 +625,7 @@ impl HardwareCollector for LinuxProcCollector {
             cores,
             memory,
             gpu: self.read_gpu(),
+
             disks,
             net,
             processes,
