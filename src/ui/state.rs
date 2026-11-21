@@ -1,4 +1,6 @@
-use crate::domain::telemetry::{RingHistory, SystemSnapshot};
+use std::collections::HashMap;
+
+use crate::domain::telemetry::{DiskTelemetry, RingHistory, SystemSnapshot};
 use ratatui::widgets::TableState;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,6 +26,7 @@ pub struct UiState {
     pub status_banner: String,
     pub cpu_history: RingHistory<60>,
     pub gpu_history: RingHistory<60>,
+    pub storage_history: HashMap<String, RingHistory<30>>,
     pub process_filter: String,
     pub filter_active: bool,
     pub filter_before_edit: Option<String>,
@@ -40,10 +43,25 @@ impl Default for UiState {
             status_banner: String::new(),
             cpu_history: RingHistory::default(),
             gpu_history: RingHistory::default(),
+            storage_history: HashMap::new(),
             process_filter: String::new(),
             filter_active: false,
             filter_before_edit: None,
             pending_kill: None,
+        }
+    }
+}
+
+impl UiState {
+    pub fn record_storage_sample(&mut self, disks: &[DiskTelemetry]) {
+        for disk in disks {
+            self.storage_history
+                .entry(disk.mount.clone())
+                .or_default()
+                .push(
+                    disk.read_bytes_per_sec
+                        .saturating_add(disk.write_bytes_per_sec),
+                );
         }
     }
 }

@@ -80,6 +80,7 @@ fn main() -> Result<()> {
             if let Some(gpu) = &new_snap.gpu {
                 ui_state.gpu_history.push(gpu.util_pct as u64);
             }
+            ui_state.record_storage_sample(&new_snap.disks);
             current_snap = new_snap;
         }
         while let Ok(msg) = ack_rx.try_recv() {

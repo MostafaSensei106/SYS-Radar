@@ -27,7 +27,7 @@ pub fn render_dashboard(frame: &mut Frame, snapshot: &SystemSnapshot, state: &mu
 
     widgets::render_header(frame, sections[0], snapshot, &state.status_banner);
     widgets::render_metrics(frame, sections[1], snapshot, state);
-    widgets::render_system(frame, sections[2], snapshot);
+    widgets::render_system(frame, sections[2], snapshot, state);
     widgets::render_processes(frame, sections[3], snapshot, state);
     widgets::render_footer(
         frame,

@@ -1,9 +1,9 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Gauge, Paragraph, Sparkline},
+    widgets::{LineGauge, Paragraph, Sparkline},
 };
 
 use crate::{
@@ -37,21 +37,38 @@ fn render_cpu(frame: &mut Frame, area: Rect, snapshot: &SystemSnapshot, state: &
         .constraints([
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(1),
         ])
         .split(inner);
 
     let usage = snapshot.global_cpu_pct.clamp(0.0, 100.0);
     frame.render_widget(
-        Gauge::default()
-            .gauge_style(Style::default().fg(if usage > 85.0 {
+        Paragraph::new(Span::styled(
+            format!("Total load  {usage:.1}%"),
+            Style::default()
+                .fg(if usage > 85.0 {
+                    theme::RED
+                } else {
+                    theme::CYAN
+                })
+                .add_modifier(Modifier::BOLD),
+        )),
+        rows[0],
+    );
+    frame.render_widget(
+        LineGauge::default()
+            .ratio(usage / 100.0)
+            .label("")
+            .filled_style(Style::default().fg(if usage > 85.0 {
                 theme::RED
             } else {
                 theme::CYAN
             }))
-            .percent(usage as u16)
-            .label(format!("Total load  {usage:.1}%")),
-        rows[0],
+            .unfilled_style(Style::default().fg(theme::MUTED))
+            .filled_symbol("━")
+            .unfilled_symbol("╌"),
+        rows[1],
     );
     let mean_frequency = if snapshot.cores.is_empty() {
         0
@@ -64,7 +81,7 @@ fn render_cpu(frame: &mut Frame, area: Rect, snapshot: &SystemSnapshot, state: &
             snapshot.specs.physical_cores, snapshot.specs.logical_cores
         ))
         .style(Style::default().fg(theme::MUTED)),
-        rows[1],
+        rows[2],
     );
     let history = state.cpu_history.to_vec();
     frame.render_widget(
@@ -72,7 +89,7 @@ fn render_cpu(frame: &mut Frame, area: Rect, snapshot: &SystemSnapshot, state: &
             .data(&history)
             .max(100)
             .style(Style::default().fg(theme::CYAN)),
-        rows[2],
+        rows[3],
     );
 }
 
@@ -87,27 +104,40 @@ fn render_memory(frame: &mut Frame, area: Rect, snapshot: &SystemSnapshot) {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(inner);
 
     let percent =
         ((memory.used_bytes as f64 / memory.total_bytes.max(1) as f64) * 100.0).clamp(0.0, 100.0);
     frame.render_widget(
-        Gauge::default()
-            .gauge_style(Style::default().fg(theme::PURPLE))
-            .percent(percent as u16)
-            .label(format!(
-                "Used  {} / {} · {:.0}%",
+        Paragraph::new(Span::styled(
+            format!(
+                "Memory used  {:.0}%  ·  {} / {}",
+                percent,
                 format_bytes(memory.used_bytes),
-                format_bytes(memory.total_bytes),
-                percent
-            )),
+                format_bytes(memory.total_bytes)
+            ),
+            Style::default()
+                .fg(theme::PURPLE)
+                .add_modifier(Modifier::BOLD),
+        )),
         rows[0],
+    );
+    frame.render_widget(
+        LineGauge::default()
+            .ratio(percent / 100.0)
+            .label("")
+            .filled_style(Style::default().fg(theme::PURPLE))
+            .unfilled_style(Style::default().fg(theme::MUTED))
+            .filled_symbol("━")
+            .unfilled_symbol("╌"),
+        rows[1],
     );
     frame.render_widget(
         Paragraph::new(format!("Cache  {}", format_bytes(memory.cached_bytes)))
             .style(Style::default().fg(theme::MUTED)),
-        rows[1],
+        rows[2],
     );
     frame.render_widget(
         Paragraph::new(format!(
@@ -116,7 +146,7 @@ fn render_memory(frame: &mut Frame, area: Rect, snapshot: &SystemSnapshot) {
             format_bytes(memory.swap_total_bytes)
         ))
         .style(Style::default().fg(theme::MUTED)),
-        rows[2],
+        rows[3],
     );
 }
 
@@ -146,16 +176,29 @@ fn render_gpu(frame: &mut Frame, area: Rect, snapshot: &SystemSnapshot, state: &
         .constraints([
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(1),
         ])
         .split(inner);
 
     frame.render_widget(
-        Gauge::default()
-            .gauge_style(Style::default().fg(theme::GREEN))
-            .percent(gpu.util_pct.min(100) as u16)
-            .label(format!("Core load  {}%", gpu.util_pct)),
+        Paragraph::new(Span::styled(
+            format!("GPU load  {}%", gpu.util_pct),
+            Style::default()
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        )),
         rows[0],
+    );
+    frame.render_widget(
+        LineGauge::default()
+            .ratio(gpu.util_pct.min(100) as f64 / 100.0)
+            .label("")
+            .filled_style(Style::default().fg(theme::GREEN))
+            .unfilled_style(Style::default().fg(theme::MUTED))
+            .filled_symbol("━")
+            .unfilled_symbol("╌"),
+        rows[1],
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -166,7 +209,7 @@ fn render_gpu(frame: &mut Frame, area: Rect, snapshot: &SystemSnapshot, state: &
                 format_bytes(gpu.mem_total)
             )),
         ])),
-        rows[1],
+        rows[2],
     );
     let history = state.gpu_history.to_vec();
     frame.render_widget(
@@ -174,6 +217,6 @@ fn render_gpu(frame: &mut Frame, area: Rect, snapshot: &SystemSnapshot, state: &
             .data(&history)
             .max(100)
             .style(Style::default().fg(theme::GREEN)),
-        rows[2],
+        rows[3],
     );
 }
