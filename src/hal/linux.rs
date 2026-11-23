@@ -365,8 +365,11 @@ impl LinuxProcCollector {
             }
 
             let s = unsafe { stat.assume_init() };
-            let total = s.f_blocks * s.f_frsize;
-            let free = s.f_bavail * s.f_frsize;
+            // libc exposes statvfs counters with platform-dependent integer
+            // widths (notably on 32-bit Linux), so normalize before multiplying.
+            let block_size = s.f_frsize as u64;
+            let total = (s.f_blocks as u64).saturating_mul(block_size);
+            let free = (s.f_bavail as u64).saturating_mul(block_size);
             if total == 0 {
                 continue;
             }
